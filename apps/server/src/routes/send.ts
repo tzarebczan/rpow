@@ -5,6 +5,7 @@ import { readSession } from './auth.js';
 import { withTx } from '../db.js';
 import { signTokenPayload } from '../signing.js';
 import { makeUnsubToken } from '../unsub.js';
+import { creditValidBalance, debitValidBalance } from '../balances.js';
 
 const Body = z.object({
   recipient_email: z.string().email(),
@@ -132,6 +133,9 @@ export async function sendRoutes(app: FastifyInstance) {
         const recipientExists = await c.query('SELECT 1 FROM users WHERE email=$1', [recipient]);
 
         if (recipientExists.rowCount) {
+          const debited = await debitValidBalance(c, sender, target);
+          if (!debited) return { error: 'INSUFFICIENT_BALANCE' as const, message: 'not enough tokens', status: 400 };
+
           const transferId = randomUUID();
           const issuedAt = new Date();
 
@@ -168,6 +172,8 @@ export async function sendRoutes(app: FastifyInstance) {
             );
           }
 
+          await creditValidBalance(c, recipient, target);
+
           await c.query(
             'INSERT INTO transfers(id, sender_email, recipient_email, amount, idempotency_key) VALUES($1,$2,$3,$4,$5)',
             [transferId, sender, recipient, target.toString(), idem],
@@ -193,6 +199,9 @@ export async function sendRoutes(app: FastifyInstance) {
         }
 
         // Recipient does not exist: invalidate sender tokens, issue change, create pending claim.
+        const debited = await debitValidBalance(c, sender, target);
+        if (!debited) return { error: 'INSUFFICIENT_BALANCE' as const, message: 'not enough tokens', status: 400 };
+
         for (const t of picked) {
           await c.query(`UPDATE tokens SET state='INVALIDATED', invalidated_at=now() WHERE id=$1`, [t.id]);
         }
